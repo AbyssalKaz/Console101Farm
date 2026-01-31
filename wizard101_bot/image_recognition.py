@@ -158,28 +158,53 @@ class ImageRecognition:
         except Exception:
             return []
     
-    def find_cards(self, confidence: float = 0.8) -> List[CardMatch]:
-        """
-        Find all cards on screen using image templates only.
-        Returns cards sorted by x position (left to right).
-        """
-        screen = self.capture_screen()
-        all_cards: List[CardMatch] = []
-        
-        for name, (template, card_type) in self._card_templates.items():
-            try:
-                result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
-                locations = np.where(result >= confidence)
+   def find_cards(self, confidence: float = 0.8) -> List[CardMatch]:
+    """
+    Find all cards on screen using multi-scale template matching.
+    This detects both enlarged (selected) cards and smaller (unselected) cards.
+    Returns cards sorted by x position (left to right).
+    """
+    screen = self.capture_screen()
+    all_cards: List[CardMatch] = []
+    
+    # Scale factors to search - covers both smaller unselected cards and larger selected cards
+    scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+    
+    for name, (template, card_type) in self._card_templates.items():
+        try:
+            original_h, original_w = template.shape[:2]
+            
+            for scale in scales:
+                # Resize template to current scale
+                new_w = int(original_w * scale)
+                new_h = int(original_h * scale)
                 
-                h, w = template.shape[:2]
+                # Skip if template would be too small
+                if new_w < 20 or new_h < 20:
+                    continue
+                
+                # Skip if template is larger than screen
+                if new_w > screen.shape[1] or new_h > screen.shape[0]:
+                    continue
+                
+                resized_template = cv2.resize(template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
+                result = cv2.matchTemplate(screen, resized_template, cv2.TM_CCOEFF_NORMED)
+                locations = np.where(result >= confidence)
                 
                 for pt in zip(*locations[::-1]):
                     x, y = pt
                     
-                    # Check for duplicates
+                    # Check for duplicates (cards detected at multiple scales)
                     is_duplicate = False
                     for existing in all_cards:
-                        if abs(x - existing.x) < w * 0.5 and abs(y - existing.y) < h * 0.5:
+                        # Use a more generous overlap threshold for multi-scale matching
+                        x_overlap = abs(x - existing.x) < max(new_w, existing.width) * 0.4
+                        y_overlap = abs(y - existing.y) < max(new_h, existing.height) * 0.4
+                        same_type = existing.card_type == card_type
+                        
+                        if x_overlap and y_overlap and same_type:
+                            # Keep the higher confidence match
                             if result[y, x] > existing.confidence:
                                 all_cards.remove(existing)
                             else:
@@ -188,17 +213,21 @@ class ImageRecognition:
                     
                     if not is_duplicate:
                         all_cards.append(CardMatch(
-                            x=x, y=y, width=w, height=h,
+                            x=x, y=y, 
+                            width=new_w, 
+                            height=new_h,
                             confidence=result[y, x],
                             card_type=card_type,
                             name=name
                         ))
-            except Exception:
-                continue
-        
-        all_cards.sort(key=lambda c: c.x)
-        return all_cards
+        except Exception as e:
+            print(f"[!] Error matching template {name} at scale: {e}")
+            continue
     
+    # Sort by x position (left to right)
+    all_cards.sort(key=lambda c: c.x)
+    return all_cards
+       
     def find_card_by_type(self, card_type: CardType, confidence: float = 0.8) -> List[CardMatch]:
         """Find all cards of a specific type"""
         all_cards = self.find_cards(confidence)
